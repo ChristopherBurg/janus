@@ -5,14 +5,19 @@ import (
   "fmt"
   "io/ioutil"
   "encoding/json"
+  "encoding/hex"
+  "math"
   "net/http"
   "net/url"
   "reflect"
+  "golang.org/x/crypto/scrypt"
   )
 
 const GetSaltURL string = "https://keybase.io/_/api/1.0/getsalt.json"
+const LoginURL string = "https://keybase.io/_/api/1.0/login.json"
 
 type User struct {
+  Name string
   Salt string
 }
 
@@ -21,18 +26,18 @@ type Session struct {
   LoginSession string
 }
 
-func getSalt(email_or_username string) (Session, User, error) {
-  fmt.Println(email_or_username)
+func (user *User) GetSalt() (Session, error) {
+  fmt.Println(user.Name)
 
   getSaltUrl, err := url.Parse(GetSaltURL)
   if err != nil {
-    return Session{}, User{}, err
+    return Session{}, err
   }
 
   fmt.Println(getSaltUrl)
 
   params := url.Values{}
-  params.Add("email_or_username", email_or_username)
+  params.Add("email_or_username", user.Name)
 
   getSaltUrl.RawQuery = params.Encode()
 
@@ -40,13 +45,13 @@ func getSalt(email_or_username string) (Session, User, error) {
 
   resp, err := http.Get(getSaltUrl.String())
   if err != nil {
-    return Session{}, User{}, err
+    return Session{}, err
   }
   defer resp.Body.Close()
 
   body, err := ioutil.ReadAll(resp.Body)
   if err != nil {
-    return Session{}, User{}, err
+    return Session{}, err
   }
 
   fmt.Println(string(body))
@@ -54,7 +59,7 @@ func getSalt(email_or_username string) (Session, User, error) {
   var saltParams map[string]interface{}
   err = json.Unmarshal(body, &saltParams)
   if err != nil {
-    return Session{}, User{}, err
+    return Session{}, err
   }
 
 //  fmt.Println(saltParams)
@@ -63,20 +68,36 @@ func getSalt(email_or_username string) (Session, User, error) {
     fmt.Println(k, ":", v, ":", reflect.TypeOf(v))
   }
 
-  salt := saltParams["salt"].(string)
+  user.Salt = saltParams["salt"].(string)
   csrfToken := saltParams["csrf_token"].(string)
   loginSession := saltParams["login_session"].(string)
 
   fmt.Println("CSRF Token:", csrfToken)
-  fmt.Println("Salt:", salt)
+  fmt.Println("Salt:", user.Salt)
   fmt.Println("Login Session:", loginSession)
 //  fmt.Printf("%+v", saltParams)
 
   session := Session{CSRFToken: csrfToken, LoginSession: loginSession}
-  me := User{Salt: salt}
 
-  return session, me, nil
+  return session, nil
 
+}
+
+func (user *User) Login(session *Session, passphrase string) (error) {
+
+  decodedSalt, err := hex.DecodeString(user.Salt)
+  if err != nil {
+    return err
+  }
+
+  hash, err := scrypt.Key([]byte(passphrase), decodedSalt, int(math.Pow(2, 15)), 8, 1, 224)
+  if err != nil {
+    return err
+  }
+
+  fmt.Println("Hash:", hex.EncodeToString(hash[192:224]))
+
+  return err
 }
 
 func main() {
@@ -87,10 +108,14 @@ func main() {
   fmt.Println("User: ", *user)
   fmt.Println("Passphrase: ", *passphrase)
 
-  session, me, err := getSalt("christopherburg")
+  me := User{Name: *user}
+
+  session, err := me.GetSalt()
   if err != nil {
     panic(err)
   }
+
+  err = me.Login(&session, *passphrase)
 
   fmt.Println("Session:", "CSRFToken:", session.CSRFToken, ":LoginSession:", session.LoginSession)
   fmt.Println("Me:", me)
