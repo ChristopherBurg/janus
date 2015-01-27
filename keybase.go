@@ -7,12 +7,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"math"
 	"net/http"
 	"net/url"
+	"reflect"
 
 	"golang.org/x/crypto/scrypt"
 )
@@ -25,8 +27,9 @@ type Session struct {
 
 // User stores information related to a Keybase.io user.
 type User struct {
-	Name string
-	Salt string
+	Name      string
+	Salt      string
+	PublicKey []string
 
 	Identity *Session
 }
@@ -36,6 +39,15 @@ const GetSaltURL string = "https://keybase.io/_/api/1.0/getsalt.json"
 
 // The URL used to log into Keybase.io.
 const LoginURL string = "https://keybase.io/_/api/1.0/login.json"
+
+// NewUser creates a new user with a given name. The name should be a Keybase.io
+// user's username or e-mail address.
+func NewUser(name string) *User {
+	session := Session{}
+	user := User{Name: name, Identity: &session}
+
+	return &user
+}
 
 // Performs an HTTP GET operation against a selected URL with specified
 // parameters. The function will return the response's body and any cookies
@@ -103,18 +115,17 @@ func post(URL string, params map[string]string) ([]byte, []*http.Cookie, error) 
 
 // Takes the body returned from Keybase.io's getsalt API call and parses into
 // retrieves the desired data from the returned JSON data.
-func parseSalt(body []byte) (string, string, string, error) {
+func parseSalt(body []byte) (string, string, error) {
 	var saltParams map[string]interface{}
 	err := json.Unmarshal(body, &saltParams)
 	if err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
 
 	salt := saltParams["salt"].(string)
-	csrfToken := saltParams["csrf_token"].(string)
 	loginSession := saltParams["login_session"].(string)
 
-	return salt, csrfToken, loginSession, nil
+	return salt, loginSession, nil
 }
 
 func (user *User) getSalt() (string, error) {
@@ -126,13 +137,12 @@ func (user *User) getSalt() (string, error) {
 		return "", err
 	}
 
-	salt, csrfToken, loginSession, err := parseSalt(body)
+	salt, loginSession, err := parseSalt(body)
 	if err != nil {
 		return "", err
 	}
 
 	user.Salt = salt
-	user.Identity.CSRFToken = csrfToken
 
 	return loginSession, nil
 }
@@ -167,6 +177,63 @@ func getHMAC(pwh []byte, loginSession string) ([]byte, error) {
 	return hmacPWH.Sum(nil), nil
 }
 
+func (user *User) verifyCSRFToken(csrfToken string) error {
+	fmt.Println("Stored CSRF Token:", user.Identity.CSRFToken)
+	fmt.Println("Received CSRF Token:", csrfToken)
+
+	if user.Identity.CSRFToken != csrfToken {
+		return errors.New("keybase: csrf token mismatch")
+	}
+
+	fmt.Println("CSRF tokens match.")
+	return nil
+}
+
+// func NewUserFromObject(userObject map[string]interface{}) (*User, error) {
+// 	var basics map[string]interface{}
+// 	err := json.Unmarshal()
+// 	basics = userObject["basics"]
+// 	user := NewUser(basics["username"])
+//
+// 	fmt.Println("User name is:", user.Name)
+//
+// 	return &user
+// }
+
+func (user *User) parseLogin(body []byte) error {
+	var loginParams map[string]interface{}
+	err := json.Unmarshal(body, &loginParams)
+	if err != nil {
+		return err
+	}
+
+	user.Identity.CSRFToken = loginParams["csrf_token"].(string)
+	fmt.Println("CSRF Token:", user.Identity.CSRFToken)
+	// TODO: Obtain and safe the CSRF token given by the login response.
+
+	me := loginParams["me"].(map[string]interface{})
+	fmt.Println("Me Type:", reflect.TypeOf(me), me)
+	fmt.Println("First Me:", reflect.TypeOf(me["id"]), me["id"])
+
+	basics := me["basics"].(map[string]interface{})
+	fmt.Println("Basics Type:", reflect.TypeOf(basics), basics)
+	fmt.Println("Basics Name:", reflect.TypeOf(basics["username"]), basics["username"])
+
+	// meUser, err := NewUserFromObject(me)
+	// if err != nil {
+	// 	return err
+	// }
+
+	// csrfToken := loginParams["csrf_token"].(string)
+	// err = user.verifyCSRFToken(csrfToken)
+	// if err != nil {
+	// 	return err
+	// }
+
+	return nil
+
+}
+
 // Login creates a session for a user.
 func (user *User) Login(passphrase string) error {
 	loginSession, err := user.getSalt()
@@ -193,13 +260,20 @@ func (user *User) Login(passphrase string) error {
 		return err
 	}
 
+	// fmt.Println("LOGIN BODY:", string(body))
+
+	err = user.parseLogin(body)
+	if err != nil {
+		return err
+	}
+
 	for _, cookie := range cookies {
 		if cookie.Name == "session" {
 			user.Identity.SessionCookie = cookie.Value
 		}
 	}
 
-	fmt.Println("Login Body:", string(body))
+	// fmt.Println("Login Body:", string(body))
 
 	return nil
 }
@@ -210,8 +284,7 @@ func main() {
 
 	flag.Parse()
 
-	session := Session{}
-	me := User{Name: *user, Identity: &session}
+	me := NewUser(*user)
 
 	err := me.Login(*passphrase)
 	if err != nil {
